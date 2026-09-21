@@ -367,6 +367,46 @@ g.graph-node:hover .node-rect { filter: brightness(0.97); }
   opacity: 0.85;
 }
 
+/* ---------- 矛盾修复向导 ---------- */
+.repair-wizard {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #e8b5ae;
+}
+.repair-wizard h4 {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--accent-dark);
+}
+.repair-hint { font-size: 12px; color: var(--ink-soft); }
+.repair-card {
+  background: #fff;
+  border: 1px solid #e5d9c3;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.repair-card-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-dark);
+}
+.repair-rels {
+  list-style: none;
+  margin: 6px 0 4px;
+  padding: 0;
+  font-size: 12.5px;
+}
+.repair-rels li { padding: 2px 0; }
+.repair-rid { color: #918a7c; font-size: 11px; margin-left: 4px; }
+.repair-resolves {
+  font-size: 11.5px;
+  color: var(--ink-soft);
+  margin: 4px 0 8px;
+}
+.repair-resolves ol { margin: 2px 0 0; padding-left: 18px; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
 /* ---------- 层位区间汇总 ---------- */
 .interval-summary {
   margin-top: 10px;

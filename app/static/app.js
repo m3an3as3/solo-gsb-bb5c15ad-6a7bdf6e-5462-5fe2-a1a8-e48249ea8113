@@ -9,6 +9,9 @@ const KIND_TEXT = {
 
 let state = { units: [], relations: [], analysis: null, affected: [] };
 let selectedId = null;
+// 修复向导候选：null = 加载中/未加载；[] = 有冲突但未找到自动方案
+let repairCandidates = null;
+let repairToken = 0;
 
 const $ = (sel) => document.querySelector(sel);
 const svgNS = "http://www.w3.org/2000/svg";
@@ -37,6 +40,26 @@ async function refresh() {
   state = await api("/api/state");
   selectedId = null;
   render();
+  syncRepair();
+}
+
+// 状态变更后同步修复向导：有冲突时异步拉取“最少删除”候选，无冲突时清空（不显示向导）
+function syncRepair() {
+  repairCandidates = null;
+  const token = ++repairToken;
+  if (!state.analysis || !state.analysis.has_conflict) return;
+  api("/api/repair-candidates")
+    .then((data) => {
+      if (token !== repairToken) return; // 已有更新的状态，丢弃过期响应
+      if (!state.analysis || !state.analysis.has_conflict) return;
+      repairCandidates = data.candidates || [];
+      render();
+    })
+    .catch(() => {
+      if (token !== repairToken) return;
+      repairCandidates = [];
+      render();
+    });
 }
 
 function showFlash(msg, type = "error", timeout = 4000) {
@@ -150,7 +173,47 @@ function renderConflicts() {
           <div class="conflict-cycle">涉及单元：${c.cycle.map(escapeHtml).join(" → ")}</div>
         </div>`
       )
-      .join("");
+      .join("") +
+    repairWizardHtml();
+}
+
+// 矛盾修复向导：展示后端计算的“最少删除关系”候选（仅在冲突状态下渲染）
+function repairWizardHtml() {
+  if (repairCandidates === null) {
+    return `<div class="repair-wizard"><h4>🔧 矛盾修复向导</h4>
+      <div class="repair-hint">正在计算“最少删除关系”方案…</div></div>`;
+  }
+  if (!repairCandidates.length) {
+    return `<div class="repair-wizard"><h4>🔧 矛盾修复向导</h4>
+      <div class="repair-hint">未找到删除少量关系即可修复的方案，请手动删除标红关系。</div></div>`;
+  }
+  const cards = repairCandidates
+    .map((cand) => {
+      const rels = cand.relations
+        .map(
+          (r) => `<li>
+            <span class="uid" data-pick="${r.source_id}">${r.source_id}</span>
+            <span class="rel-kind ${r.kind === "intersects" ? "intersects" : "temporal"}">${KIND_TEXT[r.kind]}</span>
+            <span class="uid" data-pick="${r.target_id}">${r.target_id}</span>
+            <span class="repair-rid">#${r.id}</span>
+          </li>`
+        )
+        .join("");
+      const resolves = (cand.resolves || [])
+        .map((m) => `<li>${escapeHtml(truncate(m, 48))}</li>`)
+        .join("");
+      return `<div class="repair-card">
+        <div class="repair-card-title">方案 ${cand.id}：删除 ${cand.removes} 条关系</div>
+        <ul class="repair-rels">${rels}</ul>
+        <div class="repair-resolves">应用后解除的矛盾：<ol>${resolves}</ol></div>
+        <button class="btn btn-primary btn-sm" data-apply-repair="${cand.id}">应用此方案</button>
+      </div>`;
+    })
+    .join("");
+  return `<div class="repair-wizard">
+    <h4>🔧 矛盾修复向导（最少删除方案，任选其一，应用后自动重新推演）</h4>
+    ${cards}
+  </div>`;
 }
 
 function renderSummary() {
@@ -450,6 +513,7 @@ async function submitUnit(e) {
     });
     state = data;
     render();
+    syncRepair();
     e.target.reset();
     showFlash(`单元 ${data.affected[0] || ""} 已添加（受影响节点已标出）。`, "info");
   } catch (err) {
@@ -471,6 +535,7 @@ async function submitRelation(e) {
     state = data;
     selectedId = null;
     render();
+    syncRepair();
     if (data.analysis.has_conflict) {
       showFlash("关系已保存，但形成矛盾环！冲突节点与关系已标红，受影响节点为橙色描边。", "warn", 7000);
     } else {
@@ -491,6 +556,7 @@ async function deleteUnit(id) {
     state = data;
     if (selectedId === id) selectedId = null;
     render();
+    syncRepair();
     showFlash(`单元 ${id} 已删除，受影响节点已标出。`, "info");
   } catch (err) {
     showFlash(err.message);
@@ -502,7 +568,39 @@ async function deleteRelation(id) {
     const data = await api(`/api/relations/${id}`, { method: "DELETE" });
     state = data;
     render();
+    syncRepair();
     showFlash(`关系 #${id} 已删除，受影响节点已标出。`, "info");
+  } catch (err) {
+    showFlash(err.message);
+  }
+}
+
+// 修复向导：用户确认候选后一次性删除该组关系，并用响应整体刷新
+async function applyRepair(candId) {
+  const cand = (repairCandidates || []).find((c) => c.id === candId);
+  if (!cand) return;
+  const desc = cand.relations
+    .map((r) => `#${r.id} ${r.source_id} ${KIND_TEXT[r.kind]} ${r.target_id}`)
+    .join("\n");
+  if (!confirm(`将一次性删除以下 ${cand.removes} 条关系：\n${desc}\n\n是否继续？`)) return;
+  try {
+    const data = await api("/api/repair", {
+      method: "POST",
+      body: JSON.stringify({ relation_ids: cand.relation_ids }),
+    });
+    state = data;
+    selectedId = null;
+    render();
+    syncRepair();
+    if (data.analysis.has_conflict) {
+      showFlash("已删除所选关系，但仍有矛盾未解除，请继续处理。", "warn", 7000);
+    } else {
+      showFlash(
+        `已删除 ${data.deleted_relation_ids.length} 条关系，全部矛盾解除，层位区间已重新推演。`,
+        "info",
+        6000
+      );
+    }
   } catch (err) {
     showFlash(err.message);
   }
@@ -529,6 +627,7 @@ async function loadSample() {
     state = await api("/api/sample", { method: "POST" });
     selectedId = null;
     render();
+    syncRepair();
     showFlash("示例数据已载入：7 个地层单元、含一组相交同期堆积。", "info");
   } catch (err) {
     showFlash(err.message);
@@ -541,6 +640,7 @@ async function resetAll() {
     state = await api("/api/reset", { method: "POST" });
     selectedId = null;
     render();
+    syncRepair();
   } catch (err) {
     showFlash(err.message);
   }
@@ -575,6 +675,8 @@ document.addEventListener("click", (e) => {
   if (delU) return deleteUnit(delU.dataset.delUnit);
   const delR = e.target.closest("[data-del-rel]");
   if (delR) return deleteRelation(delR.dataset.delRel);
+  const apply = e.target.closest("[data-apply-repair]");
+  if (apply) return applyRepair(+apply.dataset.applyRepair);
   const pick = e.target.closest("[data-pick]");
   if (pick) return selectUnit(pick.dataset.pick);
   const cf = e.target.closest("[data-conflict-idx]");

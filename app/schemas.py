@@ -55,6 +55,20 @@ class UnitUpdate(BaseModel):
         return (v or "").strip()
 
 
+class RepairApply(BaseModel):
+    """矛盾修复向导：一次性删除一组关系。"""
+
+    relation_ids: list[int] = Field(min_length=1, max_length=20)
+
+    @field_validator("relation_ids")
+    @classmethod
+    def _ids(cls, v: list[int]) -> list[int]:
+        ids = sorted(set(v))
+        if any(i <= 0 for i in ids):
+            raise ValueError("关系编号必须为正整数")
+        return ids
+
+
 class RelationCreate(BaseModel):
     kind: RelationKind
     source_id: str = Field(min_length=1, max_length=40)

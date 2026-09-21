@@ -31,6 +31,12 @@
 - **关系图**：SVG 分层绘制（最早层位在底部，契合地层剖面习惯），相交组以虚线框聚合，
   矛盾关系红色加粗、普通早晚关系带方向箭头；冲突时切换为网格布局以便看清环。
 - **冲突详情面板**：逐条说明矛盾原因与涉及单元，点击可定位节点。
+- **矛盾修复向导**：检测到早晚环或相交/早晚冲突时，后端以“候选删除池 + 递增枚举”
+  计算不超过 3 组**最少删除关系**候选（候选池 = 冲突标注关系 ∪ 各强连通分量内的
+  全部时序边，保证最小解不漏；按删除条数 k=1,2,… 枚举，首个使推演恢复无冲突的 k
+  即最少删除数）。每组候选列出将被删除的关系及其解除的冲突，用户确认后调用
+  `POST /api/repair` 一次性删除，并整体刷新受影响节点、层位区间与关系图；
+  没有冲突时向导不显示。
 - **JSON 导出**：一键下载包含全部单元、关系与推演结果（区间、冲突、共存组）的 JSON。
 
 ## 目录结构
@@ -38,12 +44,16 @@
 ```
 .
 ├── app/
-│   ├── main.py          # FastAPI 路由（单元/关系 CRUD、导出、示例数据）
+│   ├── main.py          # FastAPI 路由（单元/关系 CRUD、修复向导、导出、示例数据）
 │   ├── logic.py         # 关系归一化、DSU、Tarjan 环检测、层位区间推演、受影响比对
+│   ├── repair.py        # 矛盾修复向导：最少删除关系候选计算
 │   ├── db.py            # SQLite 连接与建表
 │   ├── schemas.py       # Pydantic 请求模型与校验
 │   ├── seed.py          # 内置示例（7 个单元的 Harris 式地层）
 │   └── static/          # 轻量前端 index.html / styles.css / app.js
+├── tests/
+│   ├── smoke_frontend.js  # 前端渲染冒烟测试（Node，无浏览器依赖）
+│   └── test_repair.py     # 修复向导逻辑测试（纯 Python，无第三方依赖）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt
@@ -87,8 +97,11 @@ uvicorn app.main:app --reload --port 8000
    底部文字给出总层位数与共存组统计。
 4. 故意制造矛盾（例如再添加“U7 早于 U1”）即可看到冲突详情、红色环边
    与受影响节点高亮；删除标红关系后推演自动恢复。
-5. 点击单元可在列表与图中联动定位；点击冲突条目可跳转到涉及节点。
-6. 点击 **导出 JSON** 下载完整快照。
+5. 冲突面板底部的**矛盾修复向导**会给出不超过 3 组“最少删除关系”方案，
+   每张卡片列出将被删除的关系与其解除的矛盾；点击 **应用此方案** 并确认后
+   一次性删除，受影响节点、层位区间与关系图随即整体刷新。
+6. 点击单元可在列表与图中联动定位；点击冲突条目可跳转到涉及节点。
+7. 点击 **导出 JSON** 下载完整快照。
 
 ## REST API 摘要
 
@@ -100,11 +113,43 @@ uvicorn app.main:app --reload --port 8000
 | DELETE | `/api/units/{id}` | 删除单元（级联删除关联关系） |
 | POST | `/api/relations` | 新增关系 `{kind,source_id,target_id,note}` |
 | DELETE | `/api/relations/{id}` | 删除关系 |
+| GET | `/api/repair-candidates` | 矛盾修复向导：不超过 3 组“最少删除关系”候选 |
+| POST | `/api/repair` | 一次性删除一组关系 `{relation_ids:[...]}`，返回刷新后的完整状态 |
 | POST | `/api/sample` | 清空并载入示例数据 |
 | POST | `/api/reset` | 清空全部数据 |
 | GET | `/api/export` | 下载 JSON 快照 |
 
 `kind` 取值：`earlier_than` / `later_than` / `intersects`。
+
+### 修复向导接口
+
+`GET /api/repair-candidates` 无请求体；仅在存在矛盾时返回候选，否则 `candidates` 为空：
+
+```json
+{
+  "has_conflict": true,
+  "truncated": false,
+  "candidates": [
+    {
+      "id": 1,
+      "relation_ids": [8],
+      "relations": [
+        { "id": 8, "kind": "earlier_than", "source_id": "U7", "target_id": "U1", "note": "" }
+      ],
+      "removes": 1,
+      "resolves": ["早晚关系形成闭环（U1 → U2 → … → U1），地层不可能互为先后。"]
+    }
+  ]
+}
+```
+
+- `candidates` 最多 3 组，均为**最少删除数**方案；`resolves` 说明该组解除的冲突。
+- `truncated: true` 表示组合评估达到安全上限，结果可能不完整（此时可手动删除标红关系）。
+- 单组方案最多删除 4 条关系；超过则返回空 `candidates`，由用户手动处理。
+
+`POST /api/repair` 请求体 `{"relation_ids": [8, 12]}`，在单次事务中删除这些关系，
+响应与 `POST /api/relations` 同构（`units` / `relations` / `analysis` / `affected`），
+并附 `deleted_relation_ids` 列出实际删除的关系编号；若所给编号均已不存在则返回 404。
 
 ### 导出 JSON 结构（节选）
 
@@ -128,6 +173,9 @@ uvicorn app.main:app --reload --port 8000
 ```bash
 # 前端渲染冒烟测试（仅需 Node，无浏览器依赖）
 node tests/smoke_frontend.js
+
+# 矛盾修复向导逻辑测试（纯 Python，无第三方依赖）
+python tests/test_repair.py
 ```
 
 后端推演逻辑可用一段内置的暴力校验脚本验证（枚举全部拓扑序比对区间），

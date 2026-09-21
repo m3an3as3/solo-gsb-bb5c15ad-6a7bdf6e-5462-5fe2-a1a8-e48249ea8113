@@ -159,6 +159,9 @@ for (const conflict of [false, true]) {
   } else {
     if (conflictBox.classList.contains("hidden")) throw new Error("冲突时冲突框应显示");
     if (!conflictBox.innerHTML.includes("闭环测试")) throw new Error("冲突详情未渲染");
+    // 候选尚未返回（repairCandidates === null）时应显示加载提示
+    if (!conflictBox.innerHTML.includes("矛盾修复向导")) throw new Error("修复向导未渲染");
+    if (!conflictBox.innerHTML.includes("正在计算")) throw new Error("向导加载态未渲染");
   }
   const unitList = sandbox.document.querySelector("#unit-list");
   if (!unitList.innerHTML.includes("U4")) throw new Error("单元列表未渲染");
@@ -174,4 +177,42 @@ if (esc !== "&lt;a&gt;&amp;&quot;x&quot;") throw new Error("escapeHtml 错误: "
 const tr = vm.runInContext(`truncate("abcdefgh", 7)`, sandbox);
 if (tr !== "abcdefg…") throw new Error("truncate 错误: " + tr);
 console.log("工具函数 OK");
+
+// 修复向导：注入候选后应渲染方案卡片与“应用此方案”按钮
+vm.runInContext(`
+  state = ${JSON.stringify(JSON.stringify(stateFor(true)))};
+  state = JSON.parse(state);
+  state.affected = [];
+  repairCandidates = [{
+    id: 1,
+    relation_ids: [8],
+    relations: [{ id: 8, kind: "earlier_than", source_id: "U7", target_id: "U1", note: "" }],
+    removes: 1,
+    resolves: ["闭环测试"],
+  }];
+  render();
+`, sandbox);
+{
+  const box = sandbox.document.querySelector("#conflict-box");
+  if (!box.innerHTML.includes("方案 1：删除 1 条关系")) throw new Error("候选卡片未渲染");
+  if (!box.innerHTML.includes('data-apply-repair="1"')) throw new Error("应用按钮未渲染");
+  if (!box.innerHTML.includes("闭环测试")) throw new Error("解除的冲突说明未渲染");
+  console.log("修复向导候选卡片渲染 OK");
+}
+
+// 无冲突时向导不出现
+vm.runInContext(`
+  state = ${JSON.stringify(JSON.stringify(stateFor(false)))};
+  state = JSON.parse(state);
+  state.affected = [];
+  repairCandidates = null;
+  render();
+`, sandbox);
+{
+  const box = sandbox.document.querySelector("#conflict-box");
+  if (!box.classList.contains("hidden")) throw new Error("无冲突时冲突框（含向导）应隐藏");
+  if (box.innerHTML.includes("修复向导")) throw new Error("无冲突时不应显示向导");
+  console.log("无冲突时向导隐藏 OK");
+}
+
 console.log("\n前端渲染冒烟测试全部通过 ✔");

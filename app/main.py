@@ -10,8 +10,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import db, logic, seed
-from .schemas import RelationCreate, UnitCreate, UnitUpdate
+from . import db, logic, repair, seed
+from .schemas import RelationCreate, RepairApply, UnitCreate, UnitUpdate
 
 
 @asynccontextmanager
@@ -187,6 +187,44 @@ def delete_relation(rel_id: int) -> dict:
             "relations": state["relations"],
             "analysis": logic.analyze(state),
             "affected": sorted(affected),
+        }
+
+
+@app.get("/api/repair-candidates")
+def get_repair_candidates() -> dict:
+    """矛盾修复向导：返回不超过 3 组“最少删除关系”候选。
+
+    无冲突时 candidates 为空（前端不显示向导）。
+    """
+    with db.get_conn() as conn:
+        return repair.find_candidates(db.snapshot(conn))
+
+
+@app.post("/api/repair")
+def apply_repair(payload: RepairApply) -> dict:
+    """一次性删除候选方案中的全部关系，返回刷新后的完整状态。"""
+    ids = payload.relation_ids
+    placeholders = ",".join("?" for _ in ids)
+    with _write_lock, db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, source_id, target_id FROM relations WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        if not rows:
+            raise HTTPException(status_code=404, detail="待删除的关系均已不存在，请刷新后重试")
+        before = logic.unit_signature(db.snapshot(conn))
+        conn.execute(f"DELETE FROM relations WHERE id IN ({placeholders})", ids)
+        state = db.snapshot(conn)
+        affected = set(logic.affected_units(before, state))
+        # 被删关系直接触及的单元一定标为受影响
+        for row in rows:
+            affected |= {row["source_id"], row["target_id"]}
+        return {
+            "units": state["units"],
+            "relations": state["relations"],
+            "analysis": logic.analyze(state),
+            "affected": sorted(affected),
+            "deleted_relation_ids": [row["id"] for row in rows],
         }
 
 
