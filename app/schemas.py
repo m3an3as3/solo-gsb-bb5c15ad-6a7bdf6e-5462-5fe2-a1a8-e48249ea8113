@@ -73,3 +73,16 @@ class RelationCreate(BaseModel):
     @classmethod
     def _note(cls, v) -> str:
         return (v or "").strip()
+
+
+class RepairApply(BaseModel):
+    """矛盾修复向导：一次性应用某组最少删除候选。"""
+
+    relation_ids: list[int] = Field(min_length=1, max_length=100)
+
+    @field_validator("relation_ids")
+    @classmethod
+    def _unique(cls, v: list[int]) -> list[int]:
+        if len(set(v)) != len(v):
+            raise ValueError("关系编号不能重复")
+        return v

@@ -367,6 +367,74 @@ g.graph-node:hover .node-rect { filter: brightness(0.97); }
   opacity: 0.85;
 }
 
+/* ---------- 矛盾修复向导 ---------- */
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.repair-wizard {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e8b5ae;
+}
+.repair-head {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-dark);
+  margin-bottom: 6px;
+}
+.repair-loading, .repair-empty, .repair-error {
+  font-size: 12px;
+  color: var(--ink-soft);
+  padding: 6px 4px;
+}
+.repair-error { color: var(--red); display: flex; align-items: center; gap: 8px; }
+.repair-card {
+  background: #fff;
+  border: 1px solid #ecd9ae;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  text-align: left;
+}
+.repair-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.repair-summary { font-size: 11.5px; color: var(--green); margin: 4px 0 6px; }
+.repair-dellist { list-style: none; margin: 0; padding: 0; }
+.repair-dellist > li {
+  border-top: 1px dashed #eee2c8;
+  padding: 5px 0;
+  font-size: 12px;
+}
+.repair-rel {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.repair-rel .uid {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-weight: 600;
+}
+.repair-rel-id {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  color: var(--red);
+}
+.repair-reasons {
+  list-style: none;
+  margin: 3px 0 0;
+  padding: 0 0 0 10px;
+  color: #8a5a2b;
+  font-size: 11.5px;
+}
+.repair-reasons li::before { content: "– "; }
+.repair-reasons li { margin: 1px 0; }
+
 /* ---------- 层位区间汇总 ---------- */
 .interval-summary {
   margin-top: 10px;

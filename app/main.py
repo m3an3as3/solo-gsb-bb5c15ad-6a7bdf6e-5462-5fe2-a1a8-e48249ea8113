@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import db, logic, seed
-from .schemas import RelationCreate, UnitCreate, UnitUpdate
+from .schemas import RelationCreate, RepairApply, UnitCreate, UnitUpdate
 
 
 @asynccontextmanager
@@ -20,7 +20,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="考古地层关系推演台", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="考古地层关系推演台", version="1.1.0", lifespan=lifespan)
 
 # 一次推演只涉及少量数据，用一把锁串行化写入，避免 affected 标记串号
 _write_lock = threading.Lock()
@@ -187,6 +187,58 @@ def delete_relation(rel_id: int) -> dict:
             "relations": state["relations"],
             "analysis": logic.analyze(state),
             "affected": sorted(affected),
+        }
+
+
+# ------------------------------------------------------------------
+# 矛盾修复向导
+# ------------------------------------------------------------------
+
+@app.get("/api/repair/candidates")
+def repair_candidates() -> dict:
+    """计算至多 3 组“最少删除关系”候选；无冲突时候选列表为空。"""
+    with db.get_conn() as conn:
+        state = db.snapshot(conn)
+    return logic.repair_candidates(state, limit=3)
+
+
+@app.post("/api/repair/apply")
+def repair_apply(payload: RepairApply) -> dict:
+    """用户确认某组候选后，一次性删除其中全部关系并刷新推演结果。"""
+    ids = list(dict.fromkeys(payload.relation_ids))
+    with _write_lock, db.get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, source_id, target_id FROM relations WHERE id IN "
+            f"({','.join('?' * len(ids))})",
+            ids,
+        ).fetchall()
+        found = {row["id"] for row in rows}
+        missing = [i for i in ids if i not in found]
+        if missing:
+            raise HTTPException(
+                status_code=404,
+                detail=f"关系 {', '.join('#' + str(m) for m in missing)} 不存在，"
+                       "可能已被删除，请重新获取修复候选",
+            )
+
+        before = logic.unit_signature(db.snapshot(conn))
+        conn.execute(
+            f"DELETE FROM relations WHERE id IN ({','.join('?' * len(ids))})", ids
+        )
+        state = db.snapshot(conn)
+        result = logic.analyze(state)
+        affected = set(logic.affected_units(before, state))
+        for row in rows:
+            affected.add(row["source_id"])
+            affected.add(row["target_id"])
+        affected |= set(result["conflict_unit_ids"])
+        return {
+            "units": state["units"],
+            "relations": state["relations"],
+            "analysis": result,
+            "affected": sorted(affected),
+            "repaired_relation_ids": sorted(found),
+            "repair_resolved": not result["has_conflict"],
         }
 
 

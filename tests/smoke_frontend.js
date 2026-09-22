@@ -19,7 +19,20 @@ function makeEl(tag) {
       contains(c) { return this._set.has(c); },
     },
     _innerHTML: "",
-    set innerHTML(v) { this._innerHTML = v; this.children = []; },
+    _byId: {},
+    set innerHTML(v) {
+      this._innerHTML = v;
+      this.children = [];
+      // 桩无法解析 HTML：按 id="x" 字面量同步后代元素缓存。
+      // 与真实浏览器一致：父级 innerHTML 重写后后代是全新节点
+      for (const id of Object.keys(this._byId)) {
+        if (String(v).includes(`id="${id}"`)) {
+          this._byId[id] = makeEl("div");
+        } else {
+          delete this._byId[id];
+        }
+      }
+    },
     get innerHTML() { return this._innerHTML; },
     set textContent(v) { this._innerHTML = String(v); },
     get textContent() { return this._innerHTML; },
@@ -30,7 +43,25 @@ function makeEl(tag) {
     getAttribute(k) { return this.attributes[k]; },
     addEventListener() {},
     querySelectorAll() { return []; },
-    querySelector() { return null; },
+    querySelector(sel) {
+      // 仅支持测试用到的后代 id 查询
+      if (typeof sel === "string" && sel.startsWith("#")) {
+        const id = sel.slice(1);
+        const walk = (n) =>
+          (n.children || []).find((c) => c.attributes && c.attributes.id === id) ||
+          (n.children || []).map(walk).find(Boolean) ||
+          null;
+        const found = walk(this);
+        if (found) return found;
+        // innerHTML 注入的元素：字符串中存在则惰性创建并缓存
+        if (this._innerHTML.includes(`id="${id}"`)) {
+          if (!this._byId[id]) this._byId[id] = makeEl("div");
+          return this._byId[id];
+        }
+        return null;
+      }
+      return null;
+    },
     scrollIntoView() {},
     closest() { return null; },
   };
@@ -159,13 +190,120 @@ for (const conflict of [false, true]) {
   } else {
     if (conflictBox.classList.contains("hidden")) throw new Error("冲突时冲突框应显示");
     if (!conflictBox.innerHTML.includes("闭环测试")) throw new Error("冲突详情未渲染");
-  }
-  const unitList = sandbox.document.querySelector("#unit-list");
+  }  const unitList = sandbox.document.querySelector("#unit-list");
   if (!unitList.innerHTML.includes("U4")) throw new Error("单元列表未渲染");
   const summary = sandbox.document.querySelector("#interval-summary");
   if (!summary.innerHTML) throw new Error("汇总信息未渲染");
   console.log(`${conflict ? "冲突" : "无冲突"}状态渲染 OK：节点 ${nodes.length}，` +
     `冲突框${conflictBox.classList.contains("hidden") ? "隐藏" : "显示"}`);
+}
+
+// 矛盾修复向导：加载态、候选渲染、无候选兜底
+const wizardState = stateFor(true);
+wizardState.analysis = analysis(true);
+wizardState.affected = [];
+vm.runInContext(`
+  state = ${JSON.stringify(JSON.stringify(wizardState))};
+  state = JSON.parse(state);
+  render();
+`, sandbox);
+
+// 初始：尚未加载候选 -> 不显示向导（renderConflicts 仅在有缓存/加载中时绘制容器内容）
+vm.runInContext("repairCandidates = null; repairLoading = false; renderConflicts();", sandbox);
+{
+  const wiz = sandbox.document.querySelector("#conflict-box").querySelector("#repair-wizard");
+  if (!wiz) throw new Error("冲突框内应注入向导容器");
+  if (wiz.innerHTML.includes("修复向导")) throw new Error("向导未加载时不应出现内容");
+}
+
+// 加载中
+vm.runInContext("repairLoading = true; repairCandidates = null; renderConflicts();", sandbox);
+{
+  const wiz = sandbox.document.querySelector("#conflict-box").querySelector("#repair-wizard");
+  if (!wiz.innerHTML.includes("矛盾修复向导") || !wiz.innerHTML.includes("正在计算"))
+    throw new Error("向导加载态未渲染");
+}
+
+// 候选到达
+vm.runInContext(`
+  repairLoading = false;
+  repairCandidates = {
+    has_conflict: true,
+    conflict_count: 1,
+    candidates: [
+      {
+        delete_relation_ids: [8],
+        delete_relations: [{
+          id: 8, kind: "earlier_than", source_id: "U7", target_id: "U1", note: "",
+          label: "U7 早于 U1",
+          reasons: ["若保留该关系（U7 早于 U1），早晚闭环仍存在（U1 → U7 → U1）。"]
+        }],
+        resolved_conflict_count: 1,
+        resolves_all: true,
+        summary: "删除 1 条关系后，全部 1 处矛盾解除，可恢复层位推演。"
+      },
+      {
+        delete_relation_ids: [3],
+        delete_relations: [{
+          id: 3, kind: "earlier_than", source_id: "U2", target_id: "U4", note: "",
+          label: "U2 早于 U4",
+          reasons: ["若保留该关系（U2 早于 U4），早晚闭环仍存在（U1 → U7 → U1）。"]
+        }],
+        resolved_conflict_count: 1,
+        resolves_all: true,
+        summary: "删除 1 条关系后，全部 1 处矛盾解除，可恢复层位推演。"
+      }
+    ]
+  };
+  renderConflicts();
+`, sandbox);
+{
+  const wiz = sandbox.document.querySelector("#conflict-box").querySelector("#repair-wizard");
+  const html = wiz.innerHTML;
+  if (!html.includes("找到 2 组最少删除方案")) throw new Error("候选数量未渲染");
+  if ((html.match(/data-repair-apply/g) || []).length !== 2)
+    throw new Error("应渲染 2 个“应用此方案”按钮");
+  if (!html.includes("U7") || !html.includes("#8")) throw new Error("将被删除的关系未渲染");
+  if (!html.includes("若保留该关系")) throw new Error("删除理由未渲染");
+  console.log("矛盾修复向导渲染 OK：加载态 + 2 组候选 + 删除明细");
+}
+
+// 候选为空（超求解上限）兜底
+vm.runInContext(`
+  repairCandidates = { has_conflict: true, candidates: [] };
+  repairLoading = false;
+  renderConflicts();
+`, sandbox);
+{
+  const wiz = sandbox.document.querySelector("#conflict-box").querySelector("#repair-wizard");
+  if (!wiz.innerHTML.includes("未能自动构造删除候选")) throw new Error("空候选兜底未渲染");
+}
+
+// 加载失败兜底 + 重试按钮
+vm.runInContext(`
+  repairCandidates = { error: "网络错误" };
+  renderConflicts();
+`, sandbox);
+{
+  const wiz = sandbox.document.querySelector("#conflict-box").querySelector("#repair-wizard");
+  if (!wiz.innerHTML.includes("网络错误") || !wiz.innerHTML.includes("data-repair-retry"))
+    throw new Error("加载失败兜底未渲染");
+}
+
+// 无冲突时向导不出现
+const cleanState = stateFor(false);
+cleanState.analysis = analysis(false);
+cleanState.affected = [];
+vm.runInContext(`
+  state = ${JSON.stringify(JSON.stringify(cleanState))};
+  state = JSON.parse(state);
+  repairCandidates = { candidates: [] };
+  render();
+`, sandbox);
+{
+  const box = sandbox.document.querySelector("#conflict-box");
+  if (!box.classList.contains("hidden")) throw new Error("无冲突时向导不应显示");
+  console.log("无冲突时向导隐藏 OK");
 }
 
 // 工具函数

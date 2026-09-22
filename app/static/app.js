@@ -10,6 +10,12 @@ const KIND_TEXT = {
 let state = { units: [], relations: [], analysis: null, affected: [] };
 let selectedId = null;
 
+// 矛盾修复向导：null=尚未加载，{candidates}=已加载，{error}=加载失败
+let repairCandidates = null;
+let repairLoading = false;
+let repairApplying = false;
+let repairToken = 0;
+
 const $ = (sel) => document.querySelector(sel);
 const svgNS = "http://www.w3.org/2000/svg";
 
@@ -36,7 +42,40 @@ async function api(path, options = {}) {
 async function refresh() {
   state = await api("/api/state");
   selectedId = null;
+  acceptState(state);
   render();
+}
+
+// 任何写操作返回新状态后统一入口：重置向导缓存，有冲突时懒加载候选
+function acceptState(next, opts = {}) {
+  state = next;
+  repairCandidates = null;
+  repairLoading = false;
+  repairToken++;
+  if (state.analysis && state.analysis.has_conflict) {
+    if (opts.preloadRepair !== false) loadRepairCandidates();
+  } else {
+    repairCandidates = { candidates: [] };
+  }
+}
+
+async function loadRepairCandidates() {
+  if (repairLoading) return;
+  repairLoading = true;
+  repairCandidates = null;
+  const myToken = ++repairToken;
+  renderRepairWizard();
+  try {
+    const data = await api("/api/repair/candidates");
+    if (myToken !== repairToken) return; // 期间状态已变化，丢弃过期响应
+    repairLoading = false;
+    repairCandidates = data;
+  } catch (err) {
+    if (myToken !== repairToken) return;
+    repairLoading = false;
+    repairCandidates = { error: err.message };
+  }
+  renderRepairWizard();
 }
 
 function showFlash(msg, type = "error", timeout = 4000) {
@@ -142,7 +181,7 @@ function renderConflicts() {
   }
   box.classList.remove("hidden");
   box.innerHTML =
-    `<h3>⚠ 检测到 ${conflicts.length} 处矛盾，层位推演已暂停（删除标红关系即可恢复）</h3>` +
+    `<h3>⚠ 检测到 ${conflicts.length} 处矛盾，层位推演已暂停（可手工删除标红关系，或使用下方修复向导）</h3>` +
     conflicts
       .map(
         (c, i) => `<div class="conflict-item" data-conflict-idx="${i}">
@@ -150,7 +189,118 @@ function renderConflicts() {
           <div class="conflict-cycle">涉及单元：${c.cycle.map(escapeHtml).join(" → ")}</div>
         </div>`
       )
+      .join("") +
+    '<div id="repair-wizard" class="repair-wizard"></div>';
+  renderRepairWizard();
+}
+
+function kindBadge(kind) {
+  const cls = kind === "intersects" ? "intersects" : "temporal";
+  return `<span class="rel-kind ${cls}">${KIND_TEXT[kind] || kind}</span>`;
+}
+
+function renderRepairWizard() {
+  const container = $("#conflict-box");
+  const box = container ? container.querySelector("#repair-wizard") : null;
+  if (!box) return;
+  const conflicts = (state.analysis && state.analysis.conflicts) || [];
+  if (!conflicts.length) {
+    box.innerHTML = "";
+    return;
+  }
+  if (repairLoading) {
+    box.innerHTML =
+      '<div class="repair-head">🛠 矛盾修复向导</div>' +
+      '<div class="repair-loading">正在计算“最少删除关系”候选…</div>';
+    return;
+  }
+  if (repairCandidates === null) {
+    box.innerHTML = ""; // 尚未请求候选（实际流程中 acceptState 会立即触发懒加载）
+    return;
+  }
+  if (repairCandidates.error) {
+    box.innerHTML =
+      '<div class="repair-head">🛠 矛盾修复向导</div>' +
+      `<div class="repair-error">修复候选加载失败：${escapeHtml(repairCandidates.error)}
+         <button class="btn btn-sm" data-repair-retry>重试</button></div>`;
+    return;
+  }
+  const candidates = repairCandidates.candidates || [];
+  if (!candidates.length) {
+    box.innerHTML =
+      '<div class="repair-head">🛠 矛盾修复向导</div>' +
+      '<div class="repair-empty">未能自动构造删除候选（冲突关系数量超出求解上限），' +
+      "请手工删除标红关系解除冲突。</div>";
+    return;
+  }
+  box.innerHTML =
+    `<div class="repair-head">🛠 矛盾修复向导：找到 ${candidates.length} 组最少删除方案，` +
+    "确认后一次性删除所列关系并恢复推演</div>" +
+    candidates
+      .map(
+        (cand, i) => `<div class="repair-card">
+        <div class="repair-card-head">
+          <span>方案 ${i + 1}：删除 ${cand.delete_relations.length} 条关系</span>
+          <button class="btn btn-primary btn-sm" data-repair-apply="${i}">应用此方案</button>
+        </div>
+        <div class="repair-summary">${escapeHtml(cand.summary)}</div>
+        <ul class="repair-dellist">
+          ${cand.delete_relations
+            .map(
+              (r) => `<li>
+            <div class="repair-rel">
+              <span class="uid" data-pick="${r.source_id}">${r.source_id}</span>
+              ${kindBadge(r.kind)}
+              <span class="uid" data-pick="${r.target_id}">${r.target_id}</span>
+              <span class="repair-rel-id">#${r.id}</span>
+            </div>
+            <ul class="repair-reasons">
+              ${(r.reasons || []).map((m) => `<li>${escapeHtml(m)}</li>`).join("")}
+            </ul>
+          </li>`
+            )
+            .join("")}
+        </ul>
+      </div>`
+      )
       .join("");
+}
+
+async function applyRepair(index) {
+  if (repairApplying) return;
+  const cand = repairCandidates && repairCandidates.candidates && repairCandidates.candidates[index];
+  if (!cand) return;
+  const labels = cand.delete_relations.map((r) => `#${r.id}（${r.label}）`).join("；");
+  if (!confirm(`将一次性删除以下 ${cand.delete_relations.length} 条关系：\n${labels}\n\n确认应用此修复方案？`)) {
+    return;
+  }
+  repairApplying = true;
+  document.querySelectorAll("[data-repair-apply]").forEach((b) => (b.disabled = true));
+  try {
+    const data = await api("/api/repair/apply", {
+      method: "POST",
+      body: JSON.stringify({ relation_ids: cand.delete_relation_ids }),
+    });
+    selectedId = null;
+    acceptState(data);
+    render();
+    if (data.repair_resolved) {
+      showFlash(
+        `已删除 ${data.repaired_relation_ids.length} 条关系，全部矛盾解除；受影响节点：${
+          data.affected.join("、") || "无"
+        }，层位区间已重新推演。`,
+        "info",
+        7000
+      );
+    } else {
+      showFlash("修复已应用，但仍存在矛盾，请在向导中继续处理剩余冲突。", "warn", 7000);
+    }
+  } catch (err) {
+    showFlash(err.message);
+    loadRepairCandidates();
+  } finally {
+    repairApplying = false;
+  }
 }
 
 function renderSummary() {
@@ -448,7 +598,7 @@ async function submitUnit(e) {
         note: fd.get("note").trim(),
       }),
     });
-    state = data;
+    acceptState(data);
     render();
     e.target.reset();
     showFlash(`单元 ${data.affected[0] || ""} 已添加（受影响节点已标出）。`, "info");
@@ -468,7 +618,7 @@ async function submitRelation(e) {
   };
   try {
     const data = await api("/api/relations", { method: "POST", body: JSON.stringify(payload) });
-    state = data;
+    acceptState(data);
     selectedId = null;
     render();
     if (data.analysis.has_conflict) {
@@ -488,7 +638,7 @@ async function deleteUnit(id) {
   if (!confirm(`确定删除单元 ${id}？与之关联的全部关系将一并删除。`)) return;
   try {
     const data = await api(`/api/units/${encodeURIComponent(id)}`, { method: "DELETE" });
-    state = data;
+    acceptState(data);
     if (selectedId === id) selectedId = null;
     render();
     showFlash(`单元 ${id} 已删除，受影响节点已标出。`, "info");
@@ -500,7 +650,7 @@ async function deleteUnit(id) {
 async function deleteRelation(id) {
   try {
     const data = await api(`/api/relations/${id}`, { method: "DELETE" });
-    state = data;
+    acceptState(data);
     render();
     showFlash(`关系 #${id} 已删除，受影响节点已标出。`, "info");
   } catch (err) {
@@ -526,8 +676,9 @@ async function exportJson() {
 async function loadSample() {
   if (state.units.length && !confirm("载入示例将清空当前全部数据，是否继续？")) return;
   try {
-    state = await api("/api/sample", { method: "POST" });
+    const data = await api("/api/sample", { method: "POST" });
     selectedId = null;
+    acceptState(data);
     render();
     showFlash("示例数据已载入：7 个地层单元、含一组相交同期堆积。", "info");
   } catch (err) {
@@ -538,8 +689,9 @@ async function loadSample() {
 async function resetAll() {
   if (!confirm("确定清空全部地层单元与关系？此操作不可恢复。")) return;
   try {
-    state = await api("/api/reset", { method: "POST" });
+    const data = await api("/api/reset", { method: "POST" });
     selectedId = null;
+    acceptState(data);
     render();
   } catch (err) {
     showFlash(err.message);
@@ -584,6 +736,9 @@ document.addEventListener("click", (e) => {
     render();
     return;
   }
+  const ra = e.target.closest("[data-repair-apply]");
+  if (ra) return applyRepair(+ra.dataset.repairApply);
+  if (e.target.closest("[data-repair-retry]")) return loadRepairCandidates();
 });
 
 $("#form-unit").addEventListener("submit", submitUnit);
